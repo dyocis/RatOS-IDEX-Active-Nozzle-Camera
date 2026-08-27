@@ -74,6 +74,8 @@ install_camera_host() {
   ACTIVE_PORT="$(prompt_default "Active Nozzle listen port" "8084")"
   read -r -p "Optional shared token for /select (blank = none): " TOKEN
 
+  TOKEN_B64="$(python3 -c 'import base64,sys; print(base64.b64encode(sys.argv[1].encode("utf-8")).decode("ascii"))' "$TOKEN")"
+
   sudo install -d -m 755 /usr/local/lib/active-nozzle-camera
   sudo install -m 755 "$SCRIPT_DIR/src/active_nozzle_camera.py" \
     /usr/local/lib/active-nozzle-camera/active_nozzle_camera.py
@@ -86,7 +88,7 @@ T0_STREAM_URL=$T0_STREAM
 T0_SNAPSHOT_URL=$T0_SNAPSHOT
 T1_STREAM_URL=$T1_STREAM
 T1_SNAPSHOT_URL=$T1_SNAPSHOT
-ACTIVE_CAMERA_TOKEN=$TOKEN
+ACTIVE_CAMERA_TOKEN_B64=$TOKEN_B64
 EOF
   sudo install -m 640 "$tmp_env" /etc/default/active-nozzle-camera
   rm -f "$tmp_env"
@@ -140,6 +142,8 @@ install_printer() {
     read -r -p "Shared token if configured on camera host (blank = none): " TOKEN
   fi
 
+  TOKEN_SHELL="$(printf '%q' "$TOKEN")"
+
   mkdir -p "$CONFIG_DIR/scripts"
 
   helper="$CONFIG_DIR/scripts/active_nozzle_camera.sh"
@@ -152,19 +156,22 @@ case "\$TOOL" in
     *) exit 2 ;;
 esac
 
-BASE_URL="http://${SWITCHER_HOST}:${SWITCHER_PORT}/select?tool=\${TOOL}"
-TOKEN="${TOKEN}"
+BASE_URL="http://${SWITCHER_HOST}:${SWITCHER_PORT}/select"
+TOKEN=$TOKEN_SHELL
+
+CURL_ARGS=(
+    -fsS
+    --connect-timeout 0.3
+    --max-time 1
+    --get
+    --data-urlencode "tool=\${TOOL}"
+)
 
 if [[ -n "\$TOKEN" ]]; then
-    BASE_URL="\${BASE_URL}&token=\${TOKEN}"
+    CURL_ARGS+=(--data-urlencode "token=\${TOKEN}")
 fi
 
-/usr/bin/curl \
-    -fsS \
-    --connect-timeout 0.3 \
-    --max-time 1 \
-    "\$BASE_URL" \
-    >/dev/null 2>&1 &
+/usr/bin/curl "\${CURL_ARGS[@]}" "\$BASE_URL" >/dev/null 2>&1 &
 
 exit 0
 EOF
