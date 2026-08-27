@@ -150,6 +150,11 @@ EOF
 # Watches Klipper's actual active extruder.
 # T0 = extruder
 # T1 = extruder1
+#
+# Tool changes are detected every 0.5 seconds. The current tool is also
+# reasserted every 30 seconds so a restarted camera host automatically
+# returns to the correct active nozzle feed without waiting for another
+# tool change.
 
 [gcode_shell_command active_nozzle_camera_select]
 command: /bin/bash $helper
@@ -158,9 +163,13 @@ verbose: False
 
 [gcode_macro _ACTIVE_NOZZLE_CAMERA_SYNC]
 variable_last_tool: -1
+variable_heartbeat_count: 0
 gcode:
     {% set active = printer.toolhead.extruder %}
-    {% set previous_tool = printer["gcode_macro _ACTIVE_NOZZLE_CAMERA_SYNC"].last_tool|int %}
+    {% set state = printer["gcode_macro _ACTIVE_NOZZLE_CAMERA_SYNC"] %}
+    {% set previous_tool = state.last_tool|int %}
+    {% set heartbeat_count = state.heartbeat_count|int + 1 %}
+    {% set force_sync = heartbeat_count >= 60 %}
 
     {% if active == "extruder" %}
         {% set current_tool = 0 %}
@@ -170,7 +179,13 @@ gcode:
         {% set current_tool = -1 %}
     {% endif %}
 
-    {% if current_tool >= 0 and current_tool != previous_tool %}
+    {% if force_sync %}
+        SET_GCODE_VARIABLE MACRO=_ACTIVE_NOZZLE_CAMERA_SYNC VARIABLE=heartbeat_count VALUE=0
+    {% else %}
+        SET_GCODE_VARIABLE MACRO=_ACTIVE_NOZZLE_CAMERA_SYNC VARIABLE=heartbeat_count VALUE={heartbeat_count}
+    {% endif %}
+
+    {% if current_tool >= 0 and (current_tool != previous_tool or force_sync) %}
         SET_GCODE_VARIABLE MACRO=_ACTIVE_NOZZLE_CAMERA_SYNC VARIABLE=last_tool VALUE={current_tool}
         RUN_SHELL_COMMAND CMD=active_nozzle_camera_select PARAMS={current_tool}
     {% endif %}
