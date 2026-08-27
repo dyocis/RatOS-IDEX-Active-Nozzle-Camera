@@ -24,11 +24,37 @@ prompt_default() {
   printf '%s' "${value:-$default}"
 }
 
+prompt_optional() {
+  local prompt="$1"
+  local value
+  read -r -p "$prompt: " value
+  printf '%s' "$value"
+}
+
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || {
     echo "Required command not found: $1"
     exit 1
   }
+}
+
+backup_printer_cfg() {
+  local printer_cfg="$1"
+  local backup_dir="$CONFIG_DIR/.active-nozzle-camera-backups"
+  local timestamp backup_path counter
+
+  timestamp="$(date +%Y%m%d-%H%M%S)"
+  backup_path="$backup_dir/printer.cfg.${timestamp}.bak"
+  counter=1
+
+  mkdir -p "$backup_dir"
+  while [[ -e "$backup_path" ]]; do
+    backup_path="$backup_dir/printer.cfg.${timestamp}-${counter}.bak"
+    counter=$((counter + 1))
+  done
+
+  cp -p "$printer_cfg" "$backup_path"
+  echo "Backup created: $backup_path"
 }
 
 install_camera_host() {
@@ -38,14 +64,17 @@ install_camera_host() {
   echo
   echo "Camera host setup"
   echo "Enter full MJPEG source URLs as seen from this machine."
+  echo "Snapshot URLs are optional; leave them blank to extract snapshots from the MJPEG streams."
   echo
 
   T0_STREAM="$(prompt_default "T0 stream URL" "http://127.0.0.1:8080/?action=stream")"
-  T0_SNAPSHOT="$(prompt_default "T0 snapshot URL (blank allowed)" "http://127.0.0.1:8080/?action=snapshot")"
+  T0_SNAPSHOT="$(prompt_optional "T0 snapshot URL (blank = extract from stream)")"
   T1_STREAM="$(prompt_default "T1 stream URL" "http://127.0.0.1:8081/?action=stream")"
-  T1_SNAPSHOT="$(prompt_default "T1 snapshot URL (blank allowed)" "http://127.0.0.1:8081/?action=snapshot")"
+  T1_SNAPSHOT="$(prompt_optional "T1 snapshot URL (blank = extract from stream)")"
   ACTIVE_PORT="$(prompt_default "Active Nozzle listen port" "8084")"
   read -r -p "Optional shared token for /select (blank = none): " TOKEN
+
+  TOKEN_B64="$(python3 -c 'import base64,sys; print(base64.b64encode(sys.argv[1].encode("utf-8")).decode("ascii"))' "$TOKEN")"
 
   sudo install -d -m 755 /usr/local/lib/active-nozzle-camera
   sudo install -m 755 "$SCRIPT_DIR/src/active_nozzle_camera.py" \
@@ -59,7 +88,7 @@ T0_STREAM_URL=$T0_STREAM
 T0_SNAPSHOT_URL=$T0_SNAPSHOT
 T1_STREAM_URL=$T1_STREAM
 T1_SNAPSHOT_URL=$T1_SNAPSHOT
-ACTIVE_CAMERA_TOKEN=$TOKEN
+ACTIVE_CAMERA_TOKEN_B64=$TOKEN_B64
 EOF
   sudo install -m 640 "$tmp_env" /etc/default/active-nozzle-camera
   rm -f "$tmp_env"
@@ -113,6 +142,8 @@ install_printer() {
     read -r -p "Shared token if configured on camera host (blank = none): " TOKEN
   fi
 
+  TOKEN_SHELL="$(printf '%q' "$TOKEN")"
+
   mkdir -p "$CONFIG_DIR/scripts"
 
   helper="$CONFIG_DIR/scripts/active_nozzle_camera.sh"
@@ -125,19 +156,22 @@ case "\$TOOL" in
     *) exit 2 ;;
 esac
 
-BASE_URL="http://${SWITCHER_HOST}:${SWITCHER_PORT}/select?tool=\${TOOL}"
-TOKEN="${TOKEN}"
+BASE_URL="http://${SWITCHER_HOST}:${SWITCHER_PORT}/select"
+TOKEN=$TOKEN_SHELL
+
+CURL_ARGS=(
+    -fsS
+    --connect-timeout 0.3
+    --max-time 1
+    --get
+    --data-urlencode "tool=\${TOOL}"
+)
 
 if [[ -n "\$TOKEN" ]]; then
-    BASE_URL="\${BASE_URL}&token=\${TOKEN}"
+    CURL_ARGS+=(--data-urlencode "token=\${TOKEN}")
 fi
 
-/usr/bin/curl \
-    -fsS \
-    --connect-timeout 0.3 \
-    --max-time 1 \
-    "\$BASE_URL" \
-    >/dev/null 2>&1 &
+/usr/bin/curl "\${CURL_ARGS[@]}" "\$BASE_URL" >/dev/null 2>&1 &
 
 exit 0
 EOF
@@ -150,6 +184,11 @@ EOF
 # Watches Klipper's actual active extruder.
 # T0 = extruder
 # T1 = extruder1
+#
+# Tool changes are detected every 0.5 seconds. The current tool is also
+# reasserted every 30 seconds so a restarted camera host automatically
+# returns to the correct active nozzle feed without waiting for another
+# tool change.
 
 [gcode_shell_command active_nozzle_camera_select]
 command: /bin/bash $helper
@@ -158,9 +197,13 @@ verbose: False
 
 [gcode_macro _ACTIVE_NOZZLE_CAMERA_SYNC]
 variable_last_tool: -1
+variable_heartbeat_count: 0
 gcode:
     {% set active = printer.toolhead.extruder %}
-    {% set previous_tool = printer["gcode_macro _ACTIVE_NOZZLE_CAMERA_SYNC"].last_tool|int %}
+    {% set state = printer["gcode_macro _ACTIVE_NOZZLE_CAMERA_SYNC"] %}
+    {% set previous_tool = state.last_tool|int %}
+    {% set heartbeat_count = state.heartbeat_count|int + 1 %}
+    {% set force_sync = heartbeat_count >= 60 %}
 
     {% if active == "extruder" %}
         {% set current_tool = 0 %}
@@ -170,7 +213,13 @@ gcode:
         {% set current_tool = -1 %}
     {% endif %}
 
-    {% if current_tool >= 0 and current_tool != previous_tool %}
+    {% if force_sync %}
+        SET_GCODE_VARIABLE MACRO=_ACTIVE_NOZZLE_CAMERA_SYNC VARIABLE=heartbeat_count VALUE=0
+    {% else %}
+        SET_GCODE_VARIABLE MACRO=_ACTIVE_NOZZLE_CAMERA_SYNC VARIABLE=heartbeat_count VALUE={heartbeat_count}
+    {% endif %}
+
+    {% if current_tool >= 0 and (current_tool != previous_tool or force_sync) %}
         SET_GCODE_VARIABLE MACRO=_ACTIVE_NOZZLE_CAMERA_SYNC VARIABLE=last_tool VALUE={current_tool}
         RUN_SHELL_COMMAND CMD=active_nozzle_camera_select PARAMS={current_tool}
     {% endif %}
@@ -190,6 +239,7 @@ EOF
 
   include='[include active_nozzle_camera.cfg]'
   if ! grep -qxF "$include" "$printer_cfg"; then
+    backup_printer_cfg "$printer_cfg"
     printf '\n# Automatic IDEX active nozzle camera\n%s\n' "$include" >>"$printer_cfg"
   fi
 

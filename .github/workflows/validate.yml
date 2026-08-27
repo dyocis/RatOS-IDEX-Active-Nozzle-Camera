@@ -16,3 +16,5 @@ jobs:
           bash -n verify.sh
       - name: Validate Python
         run: python3 -m py_compile src/active_nozzle_camera.py
+      - name: Run functional tests
+        run: python3 -m unittest discover -s tests -p 'test_*.py' -v
