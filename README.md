@@ -71,7 +71,9 @@ Run on the RatRig Pi:
 ./install.sh local
 ```
 
-The installer will ask for the full T0 and T1 stream URLs. Example:
+The installer will ask for the full T0 and T1 stream URLs. Snapshot URLs are optional; leave them blank to extract snapshots from the MJPEG streams.
+
+Example stream URLs:
 
 ```text
 T0: http://127.0.0.1:8080/?action=stream
@@ -88,7 +90,7 @@ On the camera Pi:
 ./install.sh camera-host
 ```
 
-Enter the existing T0 and T1 stream URLs as seen from that camera Pi.
+Enter the existing T0 and T1 stream URLs as seen from that camera Pi. Snapshot URLs may be left blank.
 
 Then on the RatOS printer Pi:
 
@@ -140,14 +142,22 @@ For a remote camera host, replace `127.0.0.1` with its IP address.
 You can also run:
 
 ```bash
-./verify.sh <switcher-host> [port]
+./verify.sh <switcher-host> [port] [token]
 ```
 
-Example:
+Example without a token:
 
 ```bash
 ./verify.sh 192.168.1.50 8084
 ```
+
+Example with a token:
+
+```bash
+./verify.sh 192.168.1.50 8084 'my token & symbols'
+```
+
+Instead of passing the token as the third argument, you may set `ACTIVE_CAMERA_TOKEN` in the shell environment before running `verify.sh`.
 
 ## Klipper restart
 
@@ -157,7 +167,11 @@ The printer installer adds:
 [include active_nozzle_camera.cfg]
 ```
 
-to `printer.cfg` if it is not already present.
+to `printer.cfg` if it is not already present. Before changing `printer.cfg`, the installer creates a timestamped backup under:
+
+```text
+~/printer_data/config/.active-nozzle-camera-backups/
+```
 
 **The installer does not restart Klipper.** Finish any active print first, then restart Klipper from Mainsail or with your normal workflow.
 
@@ -167,6 +181,8 @@ After restart:
 2. Select T1 and verify the feed changes to T1.
 3. Select T0 and verify it returns to T0.
 4. Run a small two-tool print and verify the feed follows actual tool changes.
+
+The active tool is checked every 0.5 seconds. It is also reasserted every 30 seconds so a restarted camera host automatically returns to the correct nozzle feed even if no additional tool change occurs.
 
 ## Tested Hardware
 
@@ -197,13 +213,15 @@ Example:
 ACTIVE_CAMERA_LISTEN_HOST=0.0.0.0
 ACTIVE_CAMERA_LISTEN_PORT=8084
 T0_STREAM_URL=http://127.0.0.1:8080/?action=stream
-T0_SNAPSHOT_URL=http://127.0.0.1:8080/?action=snapshot
+T0_SNAPSHOT_URL=
 T1_STREAM_URL=http://127.0.0.1:8081/?action=stream
-T1_SNAPSHOT_URL=http://127.0.0.1:8081/?action=snapshot
-ACTIVE_CAMERA_TOKEN=
+T1_SNAPSHOT_URL=
+ACTIVE_CAMERA_TOKEN_B64=
 ```
 
-If the snapshot URL is blank, the service extracts a JPEG frame from the stream instead.
+If a snapshot URL is blank, the service extracts a JPEG frame from the corresponding MJPEG stream instead.
+
+The installer stores the optional shared token as UTF-8 base64 in `ACTIVE_CAMERA_TOKEN_B64` so shell/systemd metacharacters do not corrupt the environment file. The service still accepts the older `ACTIVE_CAMERA_TOKEN` variable for backward compatibility with v0.1.0/manual configurations.
 
 ### Printer side
 
@@ -214,15 +232,15 @@ The installer creates:
 ~/printer_data/config/scripts/active_nozzle_camera.sh
 ```
 
-The shell helper sends a short HTTP request to the camera switcher only when Klipper detects that the active tool changed.
+The shell helper sends a short HTTP request to the camera switcher when Klipper detects that the active tool changed and periodically reasserts the current tool. Token and tool query parameters are URL-encoded by `curl`.
 
 ## Optional token
 
 The camera-host installer can configure an optional shared token.
 
-If enabled, `/select` requires the token and the printer helper includes it automatically.
+If enabled, `/select` requires the token and the printer helper includes it automatically. Tokens containing spaces or URL-special characters such as `&`, `+`, `%`, `#`, and `=` are supported.
 
-This is not intended to provide Internet-facing security. Keep the service on a trusted LAN and do not expose it directly to the public Internet.
+The token is intended only as a lightweight control on a trusted local network. It is sent over ordinary HTTP unless your network provides HTTPS separately, so do not treat it as Internet-facing authentication and do not expose the service directly to the public Internet.
 
 ## Uninstall
 
@@ -246,7 +264,7 @@ On the printer:
 ./uninstall.sh printer
 ```
 
-The uninstaller does not restart Klipper.
+Before removing its entries from `printer.cfg`, the uninstaller creates a timestamped backup under `.active-nozzle-camera-backups`. The uninstaller does not restart Klipper.
 
 ## Notes
 
@@ -254,7 +272,7 @@ The uninstaller does not restart Klipper.
 - Existing individual T0/T1 webcam entries can remain in Mainsail.
 - The Active Nozzle feed is an additional logical webcam.
 - The switcher re-emits JPEG frames with its own MJPEG boundary, so the two source cameras do not need to use identical multipart boundaries.
-- A camera host restart defaults the switcher to T0 until the printer side sends another tool selection.
+- A camera host restart defaults the switcher to T0, then the printer-side heartbeat reasserts the actual active tool within about 30 seconds.
 - Licensed under the GNU General Public License v3.0 (GPL-3.0).
 
 ## License
