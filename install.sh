@@ -31,6 +31,25 @@ require_cmd() {
   }
 }
 
+backup_printer_cfg() {
+  local printer_cfg="$1"
+  local backup_dir="$CONFIG_DIR/.active-nozzle-camera-backups"
+  local timestamp backup_path counter
+
+  timestamp="$(date +%Y%m%d-%H%M%S)"
+  backup_path="$backup_dir/printer.cfg.${timestamp}.bak"
+  counter=1
+
+  mkdir -p "$backup_dir"
+  while [[ -e "$backup_path" ]]; do
+    backup_path="$backup_dir/printer.cfg.${timestamp}-${counter}.bak"
+    counter=$((counter + 1))
+  done
+
+  cp -p "$printer_cfg" "$backup_path"
+  echo "Backup created: $backup_path"
+}
+
 install_camera_host() {
   require_cmd python3
   require_cmd systemctl
@@ -205,6 +224,7 @@ EOF
 
   include='[include active_nozzle_camera.cfg]'
   if ! grep -qxF "$include" "$printer_cfg"; then
+    backup_printer_cfg "$printer_cfg"
     printf '\n# Automatic IDEX active nozzle camera\n%s\n' "$include" >>"$printer_cfg"
   fi
 
