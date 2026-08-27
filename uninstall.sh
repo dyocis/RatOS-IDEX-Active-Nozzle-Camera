@@ -10,6 +10,25 @@ fi
 TARGET_USER="${SUDO_USER:-$USER}"
 TARGET_HOME="$(getent passwd "$TARGET_USER" | cut -d: -f6)"
 
+backup_printer_cfg() {
+  local printer_cfg="$1"
+  local backup_dir="$CONFIG_DIR/.active-nozzle-camera-backups"
+  local timestamp backup_path counter
+
+  timestamp="$(date +%Y%m%d-%H%M%S)"
+  backup_path="$backup_dir/printer.cfg.${timestamp}.bak"
+  counter=1
+
+  mkdir -p "$backup_dir"
+  while [[ -e "$backup_path" ]]; do
+    backup_path="$backup_dir/printer.cfg.${timestamp}-${counter}.bak"
+    counter=$((counter + 1))
+  done
+
+  cp -p "$printer_cfg" "$backup_path"
+  echo "Backup created: $backup_path"
+}
+
 remove_camera_host() {
   sudo systemctl disable --now active-nozzle-camera.service 2>/dev/null || true
   sudo rm -f /etc/systemd/system/active-nozzle-camera.service
@@ -24,8 +43,12 @@ remove_printer() {
   printer_cfg="$CONFIG_DIR/printer.cfg"
 
   if [[ -f "$printer_cfg" ]]; then
-    sed -i '/^# Automatic IDEX active nozzle camera$/d' "$printer_cfg"
-    sed -i '/^\[include active_nozzle_camera\.cfg\]$/d' "$printer_cfg"
+    if grep -qxF '# Automatic IDEX active nozzle camera' "$printer_cfg" || \
+       grep -qxF '[include active_nozzle_camera.cfg]' "$printer_cfg"; then
+      backup_printer_cfg "$printer_cfg"
+      sed -i '/^# Automatic IDEX active nozzle camera$/d' "$printer_cfg"
+      sed -i '/^\[include active_nozzle_camera\.cfg\]$/d' "$printer_cfg"
+    fi
   fi
 
   rm -f "$CONFIG_DIR/active_nozzle_camera.cfg"
