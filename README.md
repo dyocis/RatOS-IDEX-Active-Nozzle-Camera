@@ -11,7 +11,7 @@ The Klipper side watches the actual active extruder (`extruder` / `extruder1`). 
 
 ## Demo
 
-![Active Nozzle camera switching demo](active_nozzle.gif)
+![Active Nozzle camera switching demo](docs/active_nozzle.gif)
 
 Animated demo of the Active Nozzle webcam feed following real RatOS IDEX tool changes in Mainsail.
 
