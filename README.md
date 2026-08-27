@@ -1,5 +1,9 @@
 # RatOS IDEX Active Nozzle Camera
 
+[![Validate](https://github.com/dyocis/RatOS-IDEX-Active-Nozzle-Camera/actions/workflows/validate.yml/badge.svg)](https://github.com/dyocis/RatOS-IDEX-Active-Nozzle-Camera/actions/workflows/validate.yml)
+[![Latest Release](https://img.shields.io/github/v/release/dyocis/RatOS-IDEX-Active-Nozzle-Camera)](https://github.com/dyocis/RatOS-IDEX-Active-Nozzle-Camera/releases/latest)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+
 Automatically switches a single Mainsail webcam feed between the T0 and T1 nozzle cameras based on the active RatOS IDEX toolhead. Supports cameras connected directly to the printer Pi or hosted on a separate Raspberry Pi.
 
 The design supports both common layouts:
@@ -55,20 +59,21 @@ The installer never restarts Klipper automatically.
 
 ## Quick install
 
-Clone or copy this project to the appropriate machine.
-
-Make the scripts executable:
+Clone the repository on each machine where you need to install a component:
 
 ```bash
-chmod +x install.sh uninstall.sh verify.sh
+git clone https://github.com/dyocis/RatOS-IDEX-Active-Nozzle-Camera.git
+cd RatOS-IDEX-Active-Nozzle-Camera
 ```
+
+The examples below invoke the scripts with `bash`, so executable file permissions are not required.
 
 ### Option A — Cameras connected directly to the RatRig Pi
 
 Run on the RatRig Pi:
 
 ```bash
-./install.sh local
+bash ./install.sh local
 ```
 
 The installer will ask for the full T0 and T1 stream URLs. Snapshot URLs are optional; leave them blank to extract snapshots from the MJPEG streams.
@@ -87,7 +92,7 @@ It installs both the camera switcher and the Klipper integration.
 On the camera Pi:
 
 ```bash
-./install.sh camera-host
+bash ./install.sh camera-host
 ```
 
 Enter the existing T0 and T1 stream URLs as seen from that camera Pi. Snapshot URLs may be left blank.
@@ -95,7 +100,7 @@ Enter the existing T0 and T1 stream URLs as seen from that camera Pi. Snapshot U
 Then on the RatOS printer Pi:
 
 ```bash
-./install.sh printer
+bash ./install.sh printer
 ```
 
 Enter the camera host's IP/hostname and active stream port when prompted.
@@ -142,19 +147,19 @@ For a remote camera host, replace `127.0.0.1` with its IP address.
 You can also run:
 
 ```bash
-./verify.sh <switcher-host> [port] [token]
+bash ./verify.sh <switcher-host> [port] [token]
 ```
 
 Example without a token:
 
 ```bash
-./verify.sh 192.168.1.50 8084
+bash ./verify.sh 192.168.1.50 8084
 ```
 
 Example with a token:
 
 ```bash
-./verify.sh 192.168.1.50 8084 'my token & symbols'
+bash ./verify.sh 192.168.1.50 8084 'my token & symbols'
 ```
 
 Instead of passing the token as the third argument, you may set `ACTIVE_CAMERA_TOKEN` in the shell environment before running `verify.sh`.
@@ -247,7 +252,7 @@ The token is intended only as a lightweight control on a trusted local network. 
 ### Local installation
 
 ```bash
-./uninstall.sh local
+bash ./uninstall.sh local
 ```
 
 ### Remote camera host
@@ -255,13 +260,13 @@ The token is intended only as a lightweight control on a trusted local network. 
 On the camera host:
 
 ```bash
-./uninstall.sh camera-host
+bash ./uninstall.sh camera-host
 ```
 
 On the printer:
 
 ```bash
-./uninstall.sh printer
+bash ./uninstall.sh printer
 ```
 
 Before removing its entries from `printer.cfg`, the uninstaller creates a timestamped backup under `.active-nozzle-camera-backups`. The uninstaller does not restart Klipper.
