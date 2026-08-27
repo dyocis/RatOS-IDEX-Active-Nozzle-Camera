@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+import base64
+import binascii
 import json
 import os
 import threading
@@ -9,7 +11,21 @@ from urllib.request import urlopen
 
 LISTEN_HOST = os.environ.get("ACTIVE_CAMERA_LISTEN_HOST", "0.0.0.0")
 LISTEN_PORT = int(os.environ.get("ACTIVE_CAMERA_LISTEN_PORT", "8084"))
-TOKEN = os.environ.get("ACTIVE_CAMERA_TOKEN", "")
+
+
+def load_token():
+    token_b64 = os.environ.get("ACTIVE_CAMERA_TOKEN_B64", "")
+    if token_b64:
+        try:
+            return base64.b64decode(token_b64, validate=True).decode("utf-8")
+        except (binascii.Error, UnicodeDecodeError) as exc:
+            raise RuntimeError("ACTIVE_CAMERA_TOKEN_B64 is not valid UTF-8 base64") from exc
+
+    # Backward compatibility with v0.1.0/manual configurations.
+    return os.environ.get("ACTIVE_CAMERA_TOKEN", "")
+
+
+TOKEN = load_token()
 
 SOURCES = {
     0: {
