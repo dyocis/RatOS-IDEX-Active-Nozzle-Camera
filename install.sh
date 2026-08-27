@@ -24,6 +24,13 @@ prompt_default() {
   printf '%s' "${value:-$default}"
 }
 
+prompt_optional() {
+  local prompt="$1"
+  local value
+  read -r -p "$prompt: " value
+  printf '%s' "$value"
+}
+
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || {
     echo "Required command not found: $1"
@@ -57,12 +64,13 @@ install_camera_host() {
   echo
   echo "Camera host setup"
   echo "Enter full MJPEG source URLs as seen from this machine."
+  echo "Snapshot URLs are optional; leave them blank to extract snapshots from the MJPEG streams."
   echo
 
   T0_STREAM="$(prompt_default "T0 stream URL" "http://127.0.0.1:8080/?action=stream")"
-  T0_SNAPSHOT="$(prompt_default "T0 snapshot URL (blank allowed)" "http://127.0.0.1:8080/?action=snapshot")"
+  T0_SNAPSHOT="$(prompt_optional "T0 snapshot URL (blank = extract from stream)")"
   T1_STREAM="$(prompt_default "T1 stream URL" "http://127.0.0.1:8081/?action=stream")"
-  T1_SNAPSHOT="$(prompt_default "T1 snapshot URL (blank allowed)" "http://127.0.0.1:8081/?action=snapshot")"
+  T1_SNAPSHOT="$(prompt_optional "T1 snapshot URL (blank = extract from stream)")"
   ACTIVE_PORT="$(prompt_default "Active Nozzle listen port" "8084")"
   read -r -p "Optional shared token for /select (blank = none): " TOKEN
 
