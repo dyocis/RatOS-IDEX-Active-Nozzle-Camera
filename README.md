@@ -39,6 +39,18 @@ The switcher exposes:
 - `/select?tool=0` — select T0
 - `/select?tool=1` — select T1
 
+## Resource footprint
+
+The runtime is intentionally kept small for Raspberry Pi camera hosts that may already be handling several USB devices and other RatOS services.
+
+- No background camera-health polling is added.
+- No history database, telemetry cache, or retained frame history is used.
+- Tool selection uses short HTTP requests only when the tool changes or during the existing periodic reassertion.
+- MJPEG buffering is bounded so malformed upstream data cannot grow memory indefinitely.
+- Upgrade, backup, migration, and validation work runs only during installation or CI and adds no persistent runtime load.
+
+The project prioritizes clean video streaming over convenience features that would add ongoing CPU, memory, or USB/network pressure.
+
 ## Requirements
 
 ### Camera host
@@ -53,6 +65,7 @@ The switcher exposes:
 - RatOS / Klipper
 - `gcode_shell_command` support
 - `curl`
+- Python 3 for installation/upgrade token encoding
 - Standard RatOS IDEX extruder names: `extruder` for T0 and `extruder1` for T1
 
 The installer never restarts Klipper automatically.
@@ -112,6 +125,28 @@ Switcher host: 192.168.1.50
 Switcher port: 8084
 ```
 
+## Upgrade an existing installation
+
+Beginning with v0.1.2, an existing installation can be upgraded without re-entering its camera URLs, switcher address, port, or token:
+
+```bash
+bash ./install.sh upgrade
+```
+
+Run the command on each machine that has an Active Nozzle Camera component installed.
+
+The upgrade process:
+
+- detects the installed camera-host and/or printer-side component;
+- preserves the existing camera-host environment file;
+- preserves the printer-side switcher host, port, and token;
+- creates timestamped pre-upgrade backups;
+- migrates an older raw printer-helper token to the current encoded header format when needed;
+- restarts only `active-nozzle-camera.service` when the camera-host component is upgraded;
+- never restarts Klipper automatically.
+
+If the existing printer helper is incomplete or cannot be parsed safely, the upgrade stops and instructs you to repair that component with the normal interactive printer installer rather than guessing at its configuration.
+
 ## Mainsail webcam
 
 After installing the camera-host portion, add one webcam to Mainsail.
@@ -134,7 +169,7 @@ Use the Mainsail webcam service type that correctly displays your MJPEG stream. 
 
 ## Test before restarting Klipper
 
-Test the camera host manually:
+For an installation without a shared token, test the camera host manually:
 
 ```bash
 curl -s 'http://127.0.0.1:8084/status'
@@ -237,15 +272,23 @@ The installer creates:
 ~/printer_data/config/scripts/active_nozzle_camera.sh
 ```
 
-The shell helper sends a short HTTP request to the camera switcher when Klipper detects that the active tool changed and periodically reasserts the current tool. Token and tool query parameters are URL-encoded by `curl`.
+The shell helper sends a short HTTP request to the camera switcher when Klipper detects that the active tool changed and periodically reasserts the current tool. The tool value remains URL-encoded, while an optional shared token is sent as an ASCII-safe base64 value in the `X-Active-Nozzle-Token` HTTP header.
 
 ## Optional token
 
 The camera-host installer can configure an optional shared token.
 
-If enabled, `/select` requires the token and the printer helper includes it automatically. Tokens containing spaces or URL-special characters such as `&`, `+`, `%`, `#`, and `=` are supported.
+If enabled, `/select` requires the token and the printer helper includes it automatically. Tokens containing spaces, Unicode, or URL-special characters such as `&`, `+`, `%`, `#`, and `=` are supported.
+
+New v0.1.2 clients send the token in the `X-Active-Nozzle-Token` header instead of the request URL. The service temporarily retains v0.1.1 query-token compatibility for upgrades, but request logging strips query strings so legacy tokens are not written to normal HTTP request logs. Token comparison uses Python's constant-time `hmac.compare_digest()`.
 
 The token is intended only as a lightweight control on a trusted local network. It is sent over ordinary HTTP unless your network provides HTTPS separately, so do not treat it as Internet-facing authentication and do not expose the service directly to the public Internet.
+
+## Stream safety limits
+
+The switcher bounds a single JPEG or snapshot at **8 MiB**. This is intentionally generous for high-resolution USB cameras while preventing malformed streams from consuming memory indefinitely if a JPEG start marker is received without a matching end marker.
+
+Malformed data before a JPEG start marker is discarded immediately except for the single byte needed to detect a marker split across network reads. These protections do not create a background task or additional camera connection.
 
 ## Uninstall
 
@@ -270,6 +313,12 @@ bash ./uninstall.sh printer
 ```
 
 Before removing its entries from `printer.cfg`, the uninstaller creates a timestamped backup under `.active-nozzle-camera-backups`. The uninstaller does not restart Klipper.
+
+## Validation
+
+GitHub Actions checks shell syntax, Python compilation, switcher behavior, complex-token authentication, legacy compatibility and log redaction, malformed/oversized JPEG rejection, settings-preserving upgrades, and the complete install/reinstall/uninstall lifecycle in an isolated test environment.
+
+These validation tests run only in CI and do not add software or recurring work to the Raspberry Pi runtime.
 
 ## Notes
 
