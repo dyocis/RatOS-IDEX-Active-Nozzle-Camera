@@ -142,7 +142,8 @@ install_printer() {
     read -r -p "Shared token if configured on camera host (blank = none): " TOKEN
   fi
 
-  TOKEN_SHELL="$(printf '%q' "$TOKEN")"
+  TOKEN_B64="$(python3 -c 'import base64,sys; print(base64.b64encode(sys.argv[1].encode("utf-8")).decode("ascii"))' "$TOKEN")"
+  TOKEN_B64_SHELL="$(printf '%q' "$TOKEN_B64")"
 
   mkdir -p "$CONFIG_DIR/scripts"
 
@@ -157,7 +158,7 @@ case "\$TOOL" in
 esac
 
 BASE_URL="http://${SWITCHER_HOST}:${SWITCHER_PORT}/select"
-TOKEN=$TOKEN_SHELL
+TOKEN_B64=$TOKEN_B64_SHELL
 
 CURL_ARGS=(
     -fsS
@@ -167,8 +168,8 @@ CURL_ARGS=(
     --data-urlencode "tool=\${TOOL}"
 )
 
-if [[ -n "\$TOKEN" ]]; then
-    CURL_ARGS+=(--header "X-Active-Nozzle-Token: \${TOKEN}")
+if [[ -n "\$TOKEN_B64" ]]; then
+    CURL_ARGS+=(--header "X-Active-Nozzle-Token: \${TOKEN_B64}")
 fi
 
 /usr/bin/curl "\${CURL_ARGS[@]}" "\$BASE_URL" >/dev/null 2>&1 &
