@@ -168,7 +168,7 @@ CURL_ARGS=(
 )
 
 if [[ -n "\$TOKEN" ]]; then
-    CURL_ARGS+=(--data-urlencode "token=\${TOKEN}")
+    CURL_ARGS+=(--header "X-Active-Nozzle-Token: \${TOKEN}")
 fi
 
 /usr/bin/curl "\${CURL_ARGS[@]}" "\$BASE_URL" >/dev/null 2>&1 &
