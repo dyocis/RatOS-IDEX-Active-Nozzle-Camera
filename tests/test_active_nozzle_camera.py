@@ -21,6 +21,10 @@ T0_FRAME = b"\xff\xd8T0-FRAME\xff\xd9"
 T1_FRAME = b"\xff\xd8T1-FRAME\xff\xd9"
 
 
+def token_header(token):
+    return base64.b64encode(token.encode("utf-8")).decode("ascii")
+
+
 class MockCameraHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
@@ -86,9 +90,7 @@ class SwitcherProcess:
             if self.legacy_token:
                 env["ACTIVE_CAMERA_TOKEN"] = self.token
             else:
-                env["ACTIVE_CAMERA_TOKEN_B64"] = base64.b64encode(
-                    self.token.encode("utf-8")
-                ).decode("ascii")
+                env["ACTIVE_CAMERA_TOKEN_B64"] = token_header(self.token)
 
         self.process = subprocess.Popen(
             [sys.executable, str(SWITCHER)],
@@ -129,6 +131,8 @@ class SwitcherProcess:
                 process.kill()
                 process.wait(timeout=3)
         output = process.stdout.read() if process.stdout else ""
+        if process.stdout:
+            process.stdout.close()
         self.process = None
         return output
 
@@ -219,7 +223,7 @@ class ActiveNozzleCameraTests(unittest.TestCase):
             status, payload = switcher.request_json(
                 "/select",
                 {"tool": "1"},
-                {"X-Active-Nozzle-Token": "wrong-token"},
+                {"X-Active-Nozzle-Token": token_header("wrong-token")},
             )
             self.assertEqual(status, 403)
             self.assertEqual(payload["error"], "unauthorized")
@@ -227,10 +231,21 @@ class ActiveNozzleCameraTests(unittest.TestCase):
             status, payload = switcher.request_json(
                 "/select",
                 {"tool": "1"},
-                {"X-Active-Nozzle-Token": token},
+                {"X-Active-Nozzle-Token": token_header(token)},
             )
             self.assertEqual(status, 200)
             self.assertEqual(payload["active_tool"], 1)
+
+    def test_malformed_header_token_is_rejected(self):
+        token = "header-secret"
+        with SwitcherProcess(self.camera_port, token=token) as switcher:
+            status, payload = switcher.request_json(
+                "/select",
+                {"tool": "1"},
+                {"X-Active-Nozzle-Token": "not valid base64!"},
+            )
+            self.assertEqual(status, 403)
+            self.assertEqual(payload["error"], "unauthorized")
 
     def test_v011_query_token_remains_compatible_and_is_not_logged(self):
         token = "legacy-query-secret"
@@ -259,7 +274,7 @@ class ActiveNozzleCameraTests(unittest.TestCase):
             status, payload = switcher.request_json(
                 "/select",
                 {"tool": "1"},
-                {"X-Active-Nozzle-Token": token},
+                {"X-Active-Nozzle-Token": token_header(token)},
             )
             self.assertEqual(status, 200)
             self.assertEqual(payload["active_tool"], 1)
