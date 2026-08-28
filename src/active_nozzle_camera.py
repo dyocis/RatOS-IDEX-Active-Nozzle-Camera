@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import base64
 import binascii
+import hmac
 import json
 import os
 import threading
@@ -102,6 +103,12 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "ActiveNozzleCamera/1.0"
 
     def log_message(self, fmt, *args):
+        # Never write query parameters (including legacy query tokens) to logs.
+        if args and isinstance(args[0], str):
+            parts = args[0].split(" ", 2)
+            if len(parts) == 3:
+                parts[1] = parts[1].split("?", 1)[0]
+                args = (" ".join(parts),) + args[1:]
         print(f"{self.address_string()} - {fmt % args}", flush=True)
 
     def send_json(self, payload, status=200):
@@ -116,7 +123,13 @@ class Handler(BaseHTTPRequestHandler):
     def authorized(self, query):
         if not TOKEN:
             return True
-        return query.get("token", [""])[0] == TOKEN
+
+        supplied = self.headers.get("X-Active-Nozzle-Token", "")
+        if not supplied:
+            # Backward compatibility with v0.1.1 clients.
+            supplied = query.get("token", [""])[0]
+
+        return hmac.compare_digest(supplied, TOKEN)
 
     def do_GET(self):
         parsed = urlparse(self.path)
