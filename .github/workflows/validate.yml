@@ -14,7 +14,13 @@ jobs:
           bash -n install.sh
           bash -n uninstall.sh
           bash -n verify.sh
+          bash -n tests/test_upgrade.sh
+          bash -n tests/test_install_uninstall.sh
       - name: Validate Python
         run: python3 -m py_compile src/active_nozzle_camera.py
       - name: Run functional tests
         run: python3 -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Run install/uninstall test
+        run: bash tests/test_install_uninstall.sh
+      - name: Run upgrade test
+        run: bash tests/test_upgrade.sh

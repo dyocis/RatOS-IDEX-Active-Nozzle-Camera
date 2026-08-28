@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import base64
 import binascii
+import hmac
 import json
 import os
 import threading
@@ -12,17 +13,22 @@ from urllib.request import urlopen
 LISTEN_HOST = os.environ.get("ACTIVE_CAMERA_LISTEN_HOST", "0.0.0.0")
 LISTEN_PORT = int(os.environ.get("ACTIVE_CAMERA_LISTEN_PORT", "8084"))
 
+# A normal high-resolution MJPEG frame should remain well below this. The
+# limit prevents a broken upstream from growing a per-client buffer without
+# bound while still leaving generous headroom for 4K USB cameras.
+MAX_JPEG_BYTES = 8 * 1024 * 1024
+
 
 def load_token():
     token_b64 = os.environ.get("ACTIVE_CAMERA_TOKEN_B64", "")
     if token_b64:
         try:
-            return base64.b64decode(token_b64, validate=True).decode("utf-8")
-        except (binascii.Error, UnicodeDecodeError) as exc:
-            raise RuntimeError("ACTIVE_CAMERA_TOKEN_B64 is not valid UTF-8 base64") from exc
+            return base64.b64decode(token_b64, validate=True)
+        except binascii.Error as exc:
+            raise RuntimeError("ACTIVE_CAMERA_TOKEN_B64 is not valid base64") from exc
 
     # Backward compatibility with v0.1.0/manual configurations.
-    return os.environ.get("ACTIVE_CAMERA_TOKEN", "")
+    return os.environ.get("ACTIVE_CAMERA_TOKEN", "").encode("utf-8")
 
 
 TOKEN = load_token()
@@ -76,17 +82,30 @@ def iter_jpegs(url, timeout=10):
             while True:
                 start = buf.find(SOI)
                 if start < 0:
-                    if len(buf) > 2_000_000:
-                        del buf[:-2]
+                    # Only the final byte can participate in an SOI marker
+                    # split across reads. Keeping more would waste memory on
+                    # malformed/non-JPEG upstream data.
+                    if len(buf) > 1:
+                        del buf[:-1]
                     break
 
                 end = buf.find(EOI, start + 2)
                 if end < 0:
                     if start > 0:
                         del buf[:start]
+                    if len(buf) > MAX_JPEG_BYTES:
+                        raise RuntimeError(
+                            "JPEG frame exceeded 8 MiB safety limit"
+                        )
                     break
 
                 end += 2
+                frame_size = end - start
+                if frame_size > MAX_JPEG_BYTES:
+                    raise RuntimeError(
+                        "JPEG frame exceeded 8 MiB safety limit"
+                    )
+
                 frame = bytes(buf[start:end])
                 del buf[:end]
                 yield frame
@@ -102,6 +121,12 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "ActiveNozzleCamera/1.0"
 
     def log_message(self, fmt, *args):
+        # Never write query parameters (including legacy query tokens) to logs.
+        if args and isinstance(args[0], str):
+            parts = args[0].split(" ", 2)
+            if len(parts) == 3:
+                parts[1] = parts[1].split("?", 1)[0]
+                args = (" ".join(parts),) + args[1:]
         print(f"{self.address_string()} - {fmt % args}", flush=True)
 
     def send_json(self, payload, status=200):
@@ -116,7 +141,18 @@ class Handler(BaseHTTPRequestHandler):
     def authorized(self, query):
         if not TOKEN:
             return True
-        return query.get("token", [""])[0] == TOKEN
+
+        supplied_header = self.headers.get("X-Active-Nozzle-Token", "")
+        if supplied_header:
+            try:
+                supplied = base64.b64decode(supplied_header, validate=True)
+            except (binascii.Error, ValueError):
+                return False
+        else:
+            # Backward compatibility with v0.1.1 clients.
+            supplied = query.get("token", [""])[0].encode("utf-8")
+
+        return hmac.compare_digest(supplied, TOKEN)
 
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -173,7 +209,11 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if source["snapshot"]:
                 with urlopen(source["snapshot"], timeout=5) as upstream:
-                    frame = upstream.read()
+                    frame = upstream.read(MAX_JPEG_BYTES + 1)
+                    if len(frame) > MAX_JPEG_BYTES:
+                        raise RuntimeError(
+                            "snapshot exceeded 8 MiB safety limit"
+                        )
             else:
                 frame = first_frame(source["stream"], timeout=5)
         except Exception as exc:

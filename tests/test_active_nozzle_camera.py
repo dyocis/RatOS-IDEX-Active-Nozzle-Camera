@@ -12,13 +12,18 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.parse import urlencode
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SWITCHER = REPO_ROOT / "src" / "active_nozzle_camera.py"
 
 T0_FRAME = b"\xff\xd8T0-FRAME\xff\xd9"
 T1_FRAME = b"\xff\xd8T1-FRAME\xff\xd9"
+MAX_JPEG_BYTES = 8 * 1024 * 1024
+
+
+def token_header(token):
+    return base64.b64encode(token.encode("utf-8")).decode("ascii")
 
 
 class MockCameraHandler(BaseHTTPRequestHandler):
@@ -26,6 +31,27 @@ class MockCameraHandler(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
+        if self.path == "/oversized-stream":
+            self.send_response(200)
+            self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=mock-frame")
+            self.end_headers()
+
+            # Deliberately start a JPEG but never terminate it. The switcher
+            # must abort once the frame grows beyond its safety limit instead
+            # of continuing to accumulate data in memory.
+            try:
+                self.wfile.write(b"\xff\xd8")
+                remaining = MAX_JPEG_BYTES + 16384
+                chunk = b"X" * 16384
+                while remaining > 0:
+                    piece = chunk[: min(len(chunk), remaining)]
+                    self.wfile.write(piece)
+                    remaining -= len(piece)
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            return
+
         if self.path == "/t0-stream":
             frame = T0_FRAME
         elif self.path == "/t1-stream":
@@ -56,10 +82,19 @@ class MockCameraHandler(BaseHTTPRequestHandler):
 
 
 class SwitcherProcess:
-    def __init__(self, camera_port, token=None, legacy_token=False):
+    def __init__(
+        self,
+        camera_port,
+        token=None,
+        legacy_token=False,
+        t0_stream_path="/t0-stream",
+        t1_stream_path="/t1-stream",
+    ):
         self.camera_port = camera_port
         self.token = token
         self.legacy_token = legacy_token
+        self.t0_stream_path = t0_stream_path
+        self.t1_stream_path = t1_stream_path
         self.port = None
         self.process = None
 
@@ -73,9 +108,9 @@ class SwitcherProcess:
             {
                 "ACTIVE_CAMERA_LISTEN_HOST": "127.0.0.1",
                 "ACTIVE_CAMERA_LISTEN_PORT": str(self.port),
-                "T0_STREAM_URL": f"http://127.0.0.1:{self.camera_port}/t0-stream",
+                "T0_STREAM_URL": f"http://127.0.0.1:{self.camera_port}{self.t0_stream_path}",
                 "T0_SNAPSHOT_URL": "",
-                "T1_STREAM_URL": f"http://127.0.0.1:{self.camera_port}/t1-stream",
+                "T1_STREAM_URL": f"http://127.0.0.1:{self.camera_port}{self.t1_stream_path}",
                 "T1_SNAPSHOT_URL": "",
             }
         )
@@ -86,9 +121,7 @@ class SwitcherProcess:
             if self.legacy_token:
                 env["ACTIVE_CAMERA_TOKEN"] = self.token
             else:
-                env["ACTIVE_CAMERA_TOKEN_B64"] = base64.b64encode(
-                    self.token.encode("utf-8")
-                ).decode("ascii")
+                env["ACTIVE_CAMERA_TOKEN_B64"] = token_header(self.token)
 
         self.process = subprocess.Popen(
             [sys.executable, str(SWITCHER)],
@@ -119,15 +152,20 @@ class SwitcherProcess:
 
     def stop(self):
         if self.process is None:
-            return
-        if self.process.poll() is None:
-            self.process.terminate()
+            return ""
+        process = self.process
+        if process.poll() is None:
+            process.terminate()
             try:
-                self.process.wait(timeout=3)
+                process.wait(timeout=3)
             except subprocess.TimeoutExpired:
-                self.process.kill()
-                self.process.wait(timeout=3)
+                process.kill()
+                process.wait(timeout=3)
+        output = process.stdout.read() if process.stdout else ""
+        if process.stdout:
+            process.stdout.close()
         self.process = None
+        return output
 
     def url(self, path, params=None):
         url = f"http://127.0.0.1:{self.port}{path}"
@@ -135,15 +173,16 @@ class SwitcherProcess:
             url += "?" + urlencode(params)
         return url
 
-    def request(self, path, params=None):
+    def request(self, path, params=None, headers=None):
+        request = Request(self.url(path, params), headers=headers or {})
         try:
-            with urlopen(self.url(path, params), timeout=2) as response:
+            with urlopen(request, timeout=3) as response:
                 return response.status, response.read(), response.headers
         except HTTPError as exc:
             return exc.code, exc.read(), exc.headers
 
-    def request_json(self, path, params=None):
-        status, body, _ = self.request(path, params)
+    def request_json(self, path, params=None, headers=None):
+        status, body, _ = self.request(path, params, headers)
         return status, json.loads(body.decode("utf-8"))
 
 
@@ -205,7 +244,16 @@ class ActiveNozzleCameraTests(unittest.TestCase):
             self.assertEqual(headers.get_content_type(), "image/jpeg")
             self.assertEqual(body, T1_FRAME)
 
-    def test_complex_base64_token_authentication(self):
+    def test_oversized_incomplete_jpeg_is_rejected(self):
+        with SwitcherProcess(
+            self.camera_port,
+            t0_stream_path="/oversized-stream",
+        ) as switcher:
+            status, payload = switcher.request_json("/", {"action": "snapshot"})
+            self.assertEqual(status, 502)
+            self.assertIn("8 MiB safety limit", payload["error"])
+
+    def test_complex_base64_token_header_authentication(self):
         token = "Test token & plus+percent%hash#equals=space ✓"
         with SwitcherProcess(self.camera_port, token=token) as switcher:
             status, payload = switcher.request_json("/select", {"tool": "1"})
@@ -213,16 +261,48 @@ class ActiveNozzleCameraTests(unittest.TestCase):
             self.assertEqual(payload["error"], "unauthorized")
 
             status, payload = switcher.request_json(
-                "/select", {"tool": "1", "token": "wrong-token"}
+                "/select",
+                {"tool": "1"},
+                {"X-Active-Nozzle-Token": token_header("wrong-token")},
             )
             self.assertEqual(status, 403)
             self.assertEqual(payload["error"], "unauthorized")
 
             status, payload = switcher.request_json(
+                "/select",
+                {"tool": "1"},
+                {"X-Active-Nozzle-Token": token_header(token)},
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(payload["active_tool"], 1)
+
+    def test_malformed_header_token_is_rejected(self):
+        token = "header-secret"
+        with SwitcherProcess(self.camera_port, token=token) as switcher:
+            status, payload = switcher.request_json(
+                "/select",
+                {"tool": "1"},
+                {"X-Active-Nozzle-Token": "not valid base64!"},
+            )
+            self.assertEqual(status, 403)
+            self.assertEqual(payload["error"], "unauthorized")
+
+    def test_v011_query_token_remains_compatible_and_is_not_logged(self):
+        token = "legacy-query-secret"
+        switcher = SwitcherProcess(self.camera_port, token=token)
+        switcher.__enter__()
+        try:
+            status, payload = switcher.request_json(
                 "/select", {"tool": "1", "token": token}
             )
             self.assertEqual(status, 200)
             self.assertEqual(payload["active_tool"], 1)
+        finally:
+            output = switcher.stop()
+
+        self.assertNotIn(token, output)
+        self.assertNotIn("?tool=1", output)
+        self.assertIn("GET /select HTTP/1.1", output)
 
     def test_legacy_plain_token_environment_variable_still_works(self):
         token = "legacy-token"
@@ -232,7 +312,9 @@ class ActiveNozzleCameraTests(unittest.TestCase):
             legacy_token=True,
         ) as switcher:
             status, payload = switcher.request_json(
-                "/select", {"tool": "1", "token": token}
+                "/select",
+                {"tool": "1"},
+                {"X-Active-Nozzle-Token": token_header(token)},
             )
             self.assertEqual(status, 200)
             self.assertEqual(payload["active_tool"], 1)

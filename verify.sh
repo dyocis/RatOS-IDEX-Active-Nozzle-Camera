@@ -5,6 +5,15 @@ HOST="${1:-127.0.0.1}"
 PORT="${2:-8084}"
 TOKEN="${3:-${ACTIVE_CAMERA_TOKEN:-}}"
 BASE="http://${HOST}:${PORT}"
+TOKEN_B64=""
+
+if [[ -n "$TOKEN" ]]; then
+  command -v python3 >/dev/null 2>&1 || {
+    echo "python3 is required when using a shared token" >&2
+    exit 1
+  }
+  TOKEN_B64="$(python3 -c 'import base64,sys; print(base64.b64encode(sys.argv[1].encode("utf-8")).decode("ascii"))' "$TOKEN")"
+fi
 
 select_tool() {
   local tool="$1"
@@ -15,8 +24,8 @@ select_tool() {
     --data-urlencode "tool=${tool}"
   )
 
-  if [[ -n "$TOKEN" ]]; then
-    args+=(--data-urlencode "token=${TOKEN}")
+  if [[ -n "$TOKEN_B64" ]]; then
+    args+=(--header "X-Active-Nozzle-Token: ${TOKEN_B64}")
   fi
 
   curl "${args[@]}" "${BASE}/select"
