@@ -3,11 +3,11 @@ set -euo pipefail
 
 ROLE="${1:-}"
 if [[ -z "$ROLE" ]]; then
-  echo "Usage: $0 {local|camera-host|printer}"
+  echo "Usage: $0 {local|camera-host|printer|upgrade}"
   exit 2
 fi
 
-if [[ "$ROLE" != "local" && "$ROLE" != "camera-host" && "$ROLE" != "printer" ]]; then
+if [[ "$ROLE" != "local" && "$ROLE" != "camera-host" && "$ROLE" != "printer" && "$ROLE" != "upgrade" ]]; then
   echo "Invalid role: $ROLE"
   exit 2
 fi
@@ -15,6 +15,10 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TARGET_USER="${SUDO_USER:-$USER}"
 TARGET_HOME="$(getent passwd "$TARGET_USER" | cut -d: -f6)"
+SYSTEM_ROOT="${ACTIVE_CAMERA_SYSTEM_ROOT:-}"
+CAMERA_LIB_DIR="$SYSTEM_ROOT/usr/local/lib/active-nozzle-camera"
+CAMERA_ENV_FILE="$SYSTEM_ROOT/etc/default/active-nozzle-camera"
+CAMERA_SERVICE_FILE="$SYSTEM_ROOT/etc/systemd/system/active-nozzle-camera.service"
 
 prompt_default() {
   local prompt="$1"
@@ -38,23 +42,55 @@ require_cmd() {
   }
 }
 
-backup_printer_cfg() {
-  local printer_cfg="$1"
-  local backup_dir="$CONFIG_DIR/.active-nozzle-camera-backups"
-  local timestamp backup_path counter
+next_backup_path() {
+  local base="$1"
+  local path="$base"
+  local counter=1
 
-  timestamp="$(date +%Y%m%d-%H%M%S)"
-  backup_path="$backup_dir/printer.cfg.${timestamp}.bak"
-  counter=1
-
-  mkdir -p "$backup_dir"
-  while [[ -e "$backup_path" ]]; do
-    backup_path="$backup_dir/printer.cfg.${timestamp}-${counter}.bak"
+  while [[ -e "$path" ]]; do
+    path="${base}-${counter}"
     counter=$((counter + 1))
   done
 
+  printf '%s' "$path"
+}
+
+backup_printer_cfg() {
+  local printer_cfg="$1"
+  local backup_dir="$CONFIG_DIR/.active-nozzle-camera-backups"
+  local timestamp backup_path
+
+  timestamp="$(date +%Y%m%d-%H%M%S)"
+  backup_path="$(next_backup_path "$backup_dir/printer.cfg.${timestamp}.bak")"
+
+  mkdir -p "$backup_dir"
   cp -p "$printer_cfg" "$backup_path"
   echo "Backup created: $backup_path"
+}
+
+write_camera_service() {
+  local tmp_service
+
+  tmp_service="$(mktemp)"
+  cat >"$tmp_service" <<EOF
+[Unit]
+Description=RatOS IDEX Active Nozzle Camera
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=$TARGET_USER
+EnvironmentFile=/etc/default/active-nozzle-camera
+ExecStart=/usr/bin/python3 /usr/local/lib/active-nozzle-camera/active_nozzle_camera.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  sudo install -m 644 "$tmp_service" "$CAMERA_SERVICE_FILE"
+  rm -f "$tmp_service"
 }
 
 install_camera_host() {
@@ -76,9 +112,9 @@ install_camera_host() {
 
   TOKEN_B64="$(python3 -c 'import base64,sys; print(base64.b64encode(sys.argv[1].encode("utf-8")).decode("ascii"))' "$TOKEN")"
 
-  sudo install -d -m 755 /usr/local/lib/active-nozzle-camera
+  sudo install -d -m 755 "$CAMERA_LIB_DIR"
   sudo install -m 755 "$SCRIPT_DIR/src/active_nozzle_camera.py" \
-    /usr/local/lib/active-nozzle-camera/active_nozzle_camera.py
+    "$CAMERA_LIB_DIR/active_nozzle_camera.py"
 
   tmp_env="$(mktemp)"
   cat >"$tmp_env" <<EOF
@@ -90,29 +126,10 @@ T1_STREAM_URL=$T1_STREAM
 T1_SNAPSHOT_URL=$T1_SNAPSHOT
 ACTIVE_CAMERA_TOKEN_B64=$TOKEN_B64
 EOF
-  sudo install -m 640 "$tmp_env" /etc/default/active-nozzle-camera
+  sudo install -m 640 "$tmp_env" "$CAMERA_ENV_FILE"
   rm -f "$tmp_env"
 
-  tmp_service="$(mktemp)"
-  cat >"$tmp_service" <<EOF
-[Unit]
-Description=RatOS IDEX Active Nozzle Camera
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=$TARGET_USER
-EnvironmentFile=/etc/default/active-nozzle-camera
-ExecStart=/usr/bin/python3 /usr/local/lib/active-nozzle-camera/active_nozzle_camera.py
-Restart=always
-RestartSec=2
-
-[Install]
-WantedBy=multi-user.target
-EOF
-  sudo install -m 644 "$tmp_service" /etc/systemd/system/active-nozzle-camera.service
-  rm -f "$tmp_service"
+  write_camera_service
 
   sudo systemctl daemon-reload
   sudo systemctl enable --now active-nozzle-camera.service
@@ -122,28 +139,9 @@ EOF
   echo "Local test URL: http://127.0.0.1:${ACTIVE_PORT}/status"
 }
 
-install_printer() {
-  require_cmd curl
-  require_cmd python3
+write_printer_files() {
+  local helper cfg include printer_cfg
 
-  CONFIG_DIR="${PRINTER_CONFIG_DIR:-$TARGET_HOME/printer_data/config}"
-  if [[ ! -d "$CONFIG_DIR" ]]; then
-    echo "RatOS config directory not found: $CONFIG_DIR"
-    echo "Set PRINTER_CONFIG_DIR=/path/to/config and run again."
-    exit 1
-  fi
-
-  if [[ "$ROLE" == "local" ]]; then
-    SWITCHER_HOST="127.0.0.1"
-    SWITCHER_PORT="${ACTIVE_PORT:-8084}"
-    TOKEN="${TOKEN:-}"
-  else
-    SWITCHER_HOST="$(prompt_default "Camera switcher host/IP" "127.0.0.1")"
-    SWITCHER_PORT="$(prompt_default "Camera switcher port" "8084")"
-    read -r -p "Shared token if configured on camera host (blank = none): " TOKEN
-  fi
-
-  TOKEN_B64="$(python3 -c 'import base64,sys; print(base64.b64encode(sys.argv[1].encode("utf-8")).decode("ascii"))' "$TOKEN")"
   TOKEN_B64_SHELL="$(printf '%q' "$TOKEN_B64")"
 
   mkdir -p "$CONFIG_DIR/scripts"
@@ -234,21 +232,216 @@ gcode:
 EOF
 
   printer_cfg="$CONFIG_DIR/printer.cfg"
-  if [[ ! -f "$printer_cfg" ]]; then
-    echo "printer.cfg not found at $printer_cfg"
-    exit 1
-  fi
-
   include='[include active_nozzle_camera.cfg]'
   if ! grep -qxF "$include" "$printer_cfg"; then
     backup_printer_cfg "$printer_cfg"
     printf '\n# Automatic IDEX active nozzle camera\n%s\n' "$include" >>"$printer_cfg"
   fi
+}
+
+install_printer() {
+  require_cmd curl
+  require_cmd python3
+
+  CONFIG_DIR="${PRINTER_CONFIG_DIR:-$TARGET_HOME/printer_data/config}"
+  if [[ ! -d "$CONFIG_DIR" ]]; then
+    echo "RatOS config directory not found: $CONFIG_DIR"
+    echo "Set PRINTER_CONFIG_DIR=/path/to/config and run again."
+    exit 1
+  fi
+
+  if [[ ! -f "$CONFIG_DIR/printer.cfg" ]]; then
+    echo "printer.cfg not found at $CONFIG_DIR/printer.cfg"
+    exit 1
+  fi
+
+  if [[ "$ROLE" == "local" ]]; then
+    SWITCHER_HOST="127.0.0.1"
+    SWITCHER_PORT="${ACTIVE_PORT:-8084}"
+    TOKEN="${TOKEN:-}"
+  else
+    SWITCHER_HOST="$(prompt_default "Camera switcher host/IP" "127.0.0.1")"
+    SWITCHER_PORT="$(prompt_default "Camera switcher port" "8084")"
+    read -r -p "Shared token if configured on camera host (blank = none): " TOKEN
+  fi
+
+  TOKEN_B64="$(python3 -c 'import base64,sys; print(base64.b64encode(sys.argv[1].encode("utf-8")).decode("ascii"))' "$TOKEN")"
+
+  write_printer_files
 
   echo
   echo "Printer-side integration staged."
   echo "Klipper was NOT restarted."
   echo "When it is safe, restart Klipper and verify T0/T1 switching."
+}
+
+backup_camera_host_files() {
+  local timestamp backup_base backup_dir
+
+  timestamp="$(date +%Y%m%d-%H%M%S)"
+  backup_base="$SYSTEM_ROOT/etc/active-nozzle-camera-backups/upgrade-${timestamp}"
+  backup_dir="$backup_base"
+  counter=1
+
+  while sudo test -e "$backup_dir"; do
+    backup_dir="${backup_base}-${counter}"
+    counter=$((counter + 1))
+  done
+
+  sudo install -d -m 750 "$backup_dir"
+
+  if sudo test -f "$CAMERA_ENV_FILE"; then
+    sudo cp -p "$CAMERA_ENV_FILE" "$backup_dir/active-nozzle-camera.env"
+  fi
+  if sudo test -f "$CAMERA_SERVICE_FILE"; then
+    sudo cp -p "$CAMERA_SERVICE_FILE" "$backup_dir/active-nozzle-camera.service"
+  fi
+  if sudo test -f "$CAMERA_LIB_DIR/active_nozzle_camera.py"; then
+    sudo cp -p "$CAMERA_LIB_DIR/active_nozzle_camera.py" "$backup_dir/active_nozzle_camera.py"
+  fi
+
+  echo "Camera-host backup created: $backup_dir"
+}
+
+upgrade_camera_host() {
+  require_cmd python3
+  require_cmd systemctl
+
+  if ! sudo test -f "$CAMERA_ENV_FILE"; then
+    return 1
+  fi
+
+  echo
+  echo "Upgrading camera-host component..."
+  backup_camera_host_files
+
+  sudo install -d -m 755 "$CAMERA_LIB_DIR"
+  sudo install -m 755 "$SCRIPT_DIR/src/active_nozzle_camera.py" \
+    "$CAMERA_LIB_DIR/active_nozzle_camera.py"
+  write_camera_service
+
+  sudo systemctl daemon-reload
+  sudo systemctl restart active-nozzle-camera.service
+
+  echo "Camera-host configuration preserved."
+  echo "Camera service restarted with the updated switcher."
+  return 0
+}
+
+read_helper_assignment() {
+  local helper="$1"
+  local name="$2"
+  local line rhs
+
+  line="$(grep -m1 "^${name}=" "$helper" || true)"
+  if [[ -z "$line" ]]; then
+    return 1
+  fi
+
+  rhs="${line#*=}"
+  # The helper is generated by this project. Evaluate only the single stored
+  # shell-escaped value so v0.1.1 helpers can be upgraded without re-prompting.
+  eval "printf '%s' $rhs"
+}
+
+backup_printer_integration() {
+  local timestamp backup_base backup_dir helper cfg
+
+  timestamp="$(date +%Y%m%d-%H%M%S)"
+  backup_base="$CONFIG_DIR/.active-nozzle-camera-backups/upgrade-${timestamp}"
+  backup_dir="$(next_backup_path "$backup_base")"
+  helper="$CONFIG_DIR/scripts/active_nozzle_camera.sh"
+  cfg="$CONFIG_DIR/active_nozzle_camera.cfg"
+
+  mkdir -p "$backup_dir"
+  [[ -f "$helper" ]] && cp -p "$helper" "$backup_dir/active_nozzle_camera.sh"
+  [[ -f "$cfg" ]] && cp -p "$cfg" "$backup_dir/active_nozzle_camera.cfg"
+
+  echo "Printer integration backup created: $backup_dir"
+}
+
+upgrade_printer() {
+  local helper base_url host_port old_token
+
+  require_cmd curl
+  require_cmd python3
+
+  CONFIG_DIR="${PRINTER_CONFIG_DIR:-$TARGET_HOME/printer_data/config}"
+  helper="$CONFIG_DIR/scripts/active_nozzle_camera.sh"
+
+  if [[ ! -f "$helper" && ! -f "$CONFIG_DIR/active_nozzle_camera.cfg" ]]; then
+    return 1
+  fi
+
+  if [[ ! -f "$helper" ]]; then
+    echo "Cannot preserve printer settings: helper not found at $helper"
+    echo "Run '$0 printer' to repair this installation interactively."
+    exit 1
+  fi
+
+  if [[ ! -f "$CONFIG_DIR/printer.cfg" ]]; then
+    echo "printer.cfg not found at $CONFIG_DIR/printer.cfg"
+    exit 1
+  fi
+
+  base_url="$(read_helper_assignment "$helper" BASE_URL || true)"
+  if [[ "$base_url" != http://*/select ]]; then
+    echo "Cannot preserve printer switcher URL from $helper"
+    echo "Run '$0 printer' to repair this installation interactively."
+    exit 1
+  fi
+
+  host_port="${base_url#http://}"
+  host_port="${host_port%/select}"
+  SWITCHER_HOST="${host_port%:*}"
+  SWITCHER_PORT="${host_port##*:}"
+
+  if [[ -z "$SWITCHER_HOST" || -z "$SWITCHER_PORT" || "$SWITCHER_HOST" == "$host_port" ]]; then
+    echo "Cannot parse printer switcher host/port from $base_url"
+    echo "Run '$0 printer' to repair this installation interactively."
+    exit 1
+  fi
+
+  if grep -q '^TOKEN_B64=' "$helper"; then
+    TOKEN_B64="$(read_helper_assignment "$helper" TOKEN_B64 || true)"
+  elif grep -q '^TOKEN=' "$helper"; then
+    old_token="$(read_helper_assignment "$helper" TOKEN || true)"
+    TOKEN_B64="$(python3 -c 'import base64,sys; print(base64.b64encode(sys.argv[1].encode("utf-8")).decode("ascii"))' "$old_token")"
+  else
+    TOKEN_B64=""
+  fi
+
+  echo
+  echo "Upgrading printer-side component..."
+  backup_printer_integration
+  write_printer_files
+
+  echo "Printer switcher host, port, and token preserved."
+  echo "Klipper was NOT restarted."
+  return 0
+}
+
+upgrade_installation() {
+  local upgraded=0
+
+  if upgrade_camera_host; then
+    upgraded=1
+  fi
+
+  if upgrade_printer; then
+    upgraded=1
+  fi
+
+  if [[ "$upgraded" -eq 0 ]]; then
+    echo "No existing Active Nozzle Camera installation was detected."
+    echo "Use '$0 local', '$0 camera-host', or '$0 printer' for a new installation."
+    exit 1
+  fi
+
+  echo
+  echo "Upgrade complete."
+  echo "Existing settings were preserved."
+  echo "Klipper was not restarted."
 }
 
 case "$ROLE" in
@@ -261,5 +454,8 @@ case "$ROLE" in
   local)
     install_camera_host
     install_printer
+    ;;
+  upgrade)
+    upgrade_installation
     ;;
 esac
