@@ -9,6 +9,10 @@ fi
 
 TARGET_USER="${SUDO_USER:-$USER}"
 TARGET_HOME="$(getent passwd "$TARGET_USER" | cut -d: -f6)"
+SYSTEM_ROOT="${ACTIVE_CAMERA_SYSTEM_ROOT:-}"
+CAMERA_LIB_DIR="$SYSTEM_ROOT/usr/local/lib/active-nozzle-camera"
+CAMERA_ENV_FILE="$SYSTEM_ROOT/etc/default/active-nozzle-camera"
+CAMERA_SERVICE_FILE="$SYSTEM_ROOT/etc/systemd/system/active-nozzle-camera.service"
 
 backup_printer_cfg() {
   local printer_cfg="$1"
@@ -31,9 +35,9 @@ backup_printer_cfg() {
 
 remove_camera_host() {
   sudo systemctl disable --now active-nozzle-camera.service 2>/dev/null || true
-  sudo rm -f /etc/systemd/system/active-nozzle-camera.service
-  sudo rm -f /etc/default/active-nozzle-camera
-  sudo rm -rf /usr/local/lib/active-nozzle-camera
+  sudo rm -f "$CAMERA_SERVICE_FILE"
+  sudo rm -f "$CAMERA_ENV_FILE"
+  sudo rm -rf "$CAMERA_LIB_DIR"
   sudo systemctl daemon-reload
   echo "Camera-host components removed."
 }
