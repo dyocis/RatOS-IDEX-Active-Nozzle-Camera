@@ -13,6 +13,11 @@ from urllib.request import urlopen
 LISTEN_HOST = os.environ.get("ACTIVE_CAMERA_LISTEN_HOST", "0.0.0.0")
 LISTEN_PORT = int(os.environ.get("ACTIVE_CAMERA_LISTEN_PORT", "8084"))
 
+# A normal high-resolution MJPEG frame should remain well below this. The
+# limit prevents a broken upstream from growing a per-client buffer without
+# bound while still leaving generous headroom for 4K USB cameras.
+MAX_JPEG_BYTES = 8 * 1024 * 1024
+
 
 def load_token():
     token_b64 = os.environ.get("ACTIVE_CAMERA_TOKEN_B64", "")
@@ -77,17 +82,30 @@ def iter_jpegs(url, timeout=10):
             while True:
                 start = buf.find(SOI)
                 if start < 0:
-                    if len(buf) > 2_000_000:
-                        del buf[:-2]
+                    # Only the final byte can participate in an SOI marker
+                    # split across reads. Keeping more would waste memory on
+                    # malformed/non-JPEG upstream data.
+                    if len(buf) > 1:
+                        del buf[:-1]
                     break
 
                 end = buf.find(EOI, start + 2)
                 if end < 0:
                     if start > 0:
                         del buf[:start]
+                    if len(buf) > MAX_JPEG_BYTES:
+                        raise RuntimeError(
+                            "JPEG frame exceeded 8 MiB safety limit"
+                        )
                     break
 
                 end += 2
+                frame_size = end - start
+                if frame_size > MAX_JPEG_BYTES:
+                    raise RuntimeError(
+                        "JPEG frame exceeded 8 MiB safety limit"
+                    )
+
                 frame = bytes(buf[start:end])
                 del buf[:end]
                 yield frame
@@ -191,7 +209,11 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if source["snapshot"]:
                 with urlopen(source["snapshot"], timeout=5) as upstream:
-                    frame = upstream.read()
+                    frame = upstream.read(MAX_JPEG_BYTES + 1)
+                    if len(frame) > MAX_JPEG_BYTES:
+                        raise RuntimeError(
+                            "snapshot exceeded 8 MiB safety limit"
+                        )
             else:
                 frame = first_frame(source["stream"], timeout=5)
         except Exception as exc:
