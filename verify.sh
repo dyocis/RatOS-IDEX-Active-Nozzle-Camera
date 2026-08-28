@@ -16,7 +16,7 @@ select_tool() {
   )
 
   if [[ -n "$TOKEN" ]]; then
-    args+=(--data-urlencode "token=${TOKEN}")
+    args+=(--header "X-Active-Nozzle-Token: ${TOKEN}")
   fi
 
   curl "${args[@]}" "${BASE}/select"
