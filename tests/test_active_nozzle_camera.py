@@ -19,6 +19,7 @@ SWITCHER = REPO_ROOT / "src" / "active_nozzle_camera.py"
 
 T0_FRAME = b"\xff\xd8T0-FRAME\xff\xd9"
 T1_FRAME = b"\xff\xd8T1-FRAME\xff\xd9"
+MAX_JPEG_BYTES = 8 * 1024 * 1024
 
 
 def token_header(token):
@@ -30,6 +31,27 @@ class MockCameraHandler(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
+        if self.path == "/oversized-stream":
+            self.send_response(200)
+            self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=mock-frame")
+            self.end_headers()
+
+            # Deliberately start a JPEG but never terminate it. The switcher
+            # must abort once the frame grows beyond its safety limit instead
+            # of continuing to accumulate data in memory.
+            try:
+                self.wfile.write(b"\xff\xd8")
+                remaining = MAX_JPEG_BYTES + 16384
+                chunk = b"X" * 16384
+                while remaining > 0:
+                    piece = chunk[: min(len(chunk), remaining)]
+                    self.wfile.write(piece)
+                    remaining -= len(piece)
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            return
+
         if self.path == "/t0-stream":
             frame = T0_FRAME
         elif self.path == "/t1-stream":
@@ -60,10 +82,19 @@ class MockCameraHandler(BaseHTTPRequestHandler):
 
 
 class SwitcherProcess:
-    def __init__(self, camera_port, token=None, legacy_token=False):
+    def __init__(
+        self,
+        camera_port,
+        token=None,
+        legacy_token=False,
+        t0_stream_path="/t0-stream",
+        t1_stream_path="/t1-stream",
+    ):
         self.camera_port = camera_port
         self.token = token
         self.legacy_token = legacy_token
+        self.t0_stream_path = t0_stream_path
+        self.t1_stream_path = t1_stream_path
         self.port = None
         self.process = None
 
@@ -77,9 +108,9 @@ class SwitcherProcess:
             {
                 "ACTIVE_CAMERA_LISTEN_HOST": "127.0.0.1",
                 "ACTIVE_CAMERA_LISTEN_PORT": str(self.port),
-                "T0_STREAM_URL": f"http://127.0.0.1:{self.camera_port}/t0-stream",
+                "T0_STREAM_URL": f"http://127.0.0.1:{self.camera_port}{self.t0_stream_path}",
                 "T0_SNAPSHOT_URL": "",
-                "T1_STREAM_URL": f"http://127.0.0.1:{self.camera_port}/t1-stream",
+                "T1_STREAM_URL": f"http://127.0.0.1:{self.camera_port}{self.t1_stream_path}",
                 "T1_SNAPSHOT_URL": "",
             }
         )
@@ -145,7 +176,7 @@ class SwitcherProcess:
     def request(self, path, params=None, headers=None):
         request = Request(self.url(path, params), headers=headers or {})
         try:
-            with urlopen(request, timeout=2) as response:
+            with urlopen(request, timeout=3) as response:
                 return response.status, response.read(), response.headers
         except HTTPError as exc:
             return exc.code, exc.read(), exc.headers
@@ -212,6 +243,15 @@ class ActiveNozzleCameraTests(unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertEqual(headers.get_content_type(), "image/jpeg")
             self.assertEqual(body, T1_FRAME)
+
+    def test_oversized_incomplete_jpeg_is_rejected(self):
+        with SwitcherProcess(
+            self.camera_port,
+            t0_stream_path="/oversized-stream",
+        ) as switcher:
+            status, payload = switcher.request_json("/", {"action": "snapshot"})
+            self.assertEqual(status, 502)
+            self.assertIn("8 MiB safety limit", payload["error"])
 
     def test_complex_base64_token_header_authentication(self):
         token = "Test token & plus+percent%hash#equals=space ✓"
