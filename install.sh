@@ -124,6 +124,7 @@ EOF
 
 install_printer() {
   require_cmd curl
+  require_cmd python3
 
   CONFIG_DIR="${PRINTER_CONFIG_DIR:-$TARGET_HOME/printer_data/config}"
   if [[ ! -d "$CONFIG_DIR" ]]; then
