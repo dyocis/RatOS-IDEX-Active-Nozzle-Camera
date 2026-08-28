@@ -18,12 +18,12 @@ def load_token():
     token_b64 = os.environ.get("ACTIVE_CAMERA_TOKEN_B64", "")
     if token_b64:
         try:
-            return base64.b64decode(token_b64, validate=True).decode("utf-8")
-        except (binascii.Error, UnicodeDecodeError) as exc:
-            raise RuntimeError("ACTIVE_CAMERA_TOKEN_B64 is not valid UTF-8 base64") from exc
+            return base64.b64decode(token_b64, validate=True)
+        except binascii.Error as exc:
+            raise RuntimeError("ACTIVE_CAMERA_TOKEN_B64 is not valid base64") from exc
 
     # Backward compatibility with v0.1.0/manual configurations.
-    return os.environ.get("ACTIVE_CAMERA_TOKEN", "")
+    return os.environ.get("ACTIVE_CAMERA_TOKEN", "").encode("utf-8")
 
 
 TOKEN = load_token()
@@ -124,10 +124,15 @@ class Handler(BaseHTTPRequestHandler):
         if not TOKEN:
             return True
 
-        supplied = self.headers.get("X-Active-Nozzle-Token", "")
-        if not supplied:
+        supplied_header = self.headers.get("X-Active-Nozzle-Token", "")
+        if supplied_header:
+            try:
+                supplied = base64.b64decode(supplied_header, validate=True)
+            except (binascii.Error, ValueError):
+                return False
+        else:
             # Backward compatibility with v0.1.1 clients.
-            supplied = query.get("token", [""])[0]
+            supplied = query.get("token", [""])[0].encode("utf-8")
 
         return hmac.compare_digest(supplied, TOKEN)
 
